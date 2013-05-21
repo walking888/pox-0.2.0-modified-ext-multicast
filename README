@@ -1,0 +1,25 @@
+POX:
+
+  Put igmp.py in pox/pox/lib/packet
+  Put this dir in pox/ext/
+  Start this module by ./pox.py multicast.startmulti
+
+Mininet:
+
+  sudo ./topo-butterfly.py
+
+Iperf:
+  
+  In Mininet CLI
+  mininet> xterm h1 h2 h3
+  In h1, band h1 with 224.0.1.10 and 224.0.1.11
+  # iperf -s -u -B 224.0.1.10 &
+  # iperf -s -u -B 224.0.1.11
+  In h2, band h2 with 224.0.1.10 and 224.0.1.12
+  # iperf -s -u -B 224.0.1.10 &
+  # iperf -s -u -B 224.0.1.12
+  In h3, send udp packet to 224.0.1.10, 224.0.1.11 and 224.0.1.12
+  # iperf -u -c 224.0.1.10
+  # iperf -u -c 224.0.1.11
+  # iperf -u -c 224.0.1.12
+
