@@ -285,6 +285,9 @@ class MulticastNC(MulticastSPF):
 		self.initcode = {}
 		self.topoorder = []
 		self.encode = {}
+		self.difflinks = []
+		self.match_change = deepcopy(match)
+		self.match_change.nw_proto = 200 + self.shift
 
 		if len(src) == 1:
 			if self.dst.count((src[0])) != 0:
@@ -320,6 +323,7 @@ class MulticastNC(MulticastSPF):
 		else :
 			print "wrong dst id or src id!"
 
+
 	def cMulvAdd(self, vec1, vec2, size, co):
 		#print "start mulvadd:", vec1, vec2, size, co
 		for i in range(size):
@@ -346,11 +350,11 @@ class MulticastNC(MulticastSPF):
 		self.path = self.__MultiNCPath()
 		if self.path is None:
 			return False
+		self.pathtoaction = self.__OutputActionPerSwitchNC()
 		self.initcode = self.__InitializationCode()
 		if self.initcode is None:
 			print "need init code we donot support!"
 			return False
-		self.pathtoaction = self.__OutputActionPerSwitchNC()
 		self.codednode = self.__FindCodedNode()
 		self.topoorder = self.__CodeOrder()
 		if self.topoorder is not False:
@@ -376,24 +380,16 @@ class MulticastNC(MulticastSPF):
 				self.exceptlinks.extend(tmppath[dst[0]])
 		return path 
 
+
 	def __InitializationCode(self):
 		initcode = {}
-		difflink = {}
-		for path in self.path.keys():
-			link = self.path[path][0]
-			if not difflink.has_key(link):
-				difflink[link] = [path]
-			else :
-				difflink[link].append(path)
-		if len(difflink) > self.pathnum:
-			# need special init code
-			return None
-		else :
-			i = 0
-			for link in difflink.keys():
-				initcode[link] = [0 for x in range(self.pathnum)]
-				initcode[link][i] = 1
-				i = i + 1
+		srcmy = self.src[0][0]
+		for outport in self.pathtoaction[srcmy][0][self.src[0][1]]:
+			self.difflinks.append((self.src[0][1], outport))
+		for i in range(len(self.difflinks)):
+			tmppathids = self.pathtoaction[srcmy][2][self.difflinks[i]]
+			for tmppathid in tmppathids:
+				self.initcode[tmppathid] = i
 		return initcode
 
 	def __OutputActionPerSwitchNC(self):
@@ -426,13 +422,13 @@ class MulticastNC(MulticastSPF):
 			tmpport = self.src[0][1]
 			for link in path:
 				port = core.openflow_topology.link_to_port(link[0] ,link[1])
-				switches_add(switches, link[0], tmpport, port)
+				pathid = (tmpdst.index(dst[0]), dst[1])
+				switches_add(switches, link[0], tmpport, port, pathid)
 				tmpport = core.openflow_topology.link_to_port(link[1], link[0])
 				if link[1] == dst[0]:
-					for i in self.dst:
-						if i[0] == dst[0]:
-							pathid = (tmpdst.index(dst[0]), dst[1])
-							switches_add(switches, link[1], tmpport, i[1], pathid)
+					ii = tmpdst.index(dst[0])
+					pathid = (tmpdst.index(dst[0]), dst[1])
+					switches_add(switches, link[1], tmpport, self.dst[ii][1], pathid)
 		# remove duplicates
 		for sw in switches.keys():
 			[ins, outs] = switches[sw]
@@ -499,34 +495,152 @@ class MulticastNC(MulticastSPF):
 		# 
 		myswitch = {}
 			
-		B = {} 
+		B = {}
+		a = {}
+		tmpall = []
 		for i in range(len(self.dst)):
 			B[i] = {}
+			a[i] = {}
+			tmpall = []
 			for j in range(self.pathnum):
-				path = self.path[(self.dst[i][0], j)]
-				B[i][j] = self.initcode[path[0]]
-		a = deepcopy(B)
+				B[i][j] = deepcopy(self.NCvector[self.pathnum][self.initcode[(i, j)]])
+				try:
+					tmpall.append(self.initcode[(i, j)])
+				except IndexError:
+					print "link "+ str(path[0]) + " is not in difflinks!"
+			for j in range(self.pathnum):
+				tmpall1 = deepcopy(tmpall)
+				del tmpall1[j]
+				tmpall1 = tuple(tmpall1)
+				a[i][j] = self.NCmatrix[self.pathnum][tmpall1]
 		
 		for sw in self.topoorder:
-			(outport, pathids) = self.needcode[sw]
-			codelen = len(self.pathtoaction[sw][1][outport])
+			outports = self.needcode[sw]
+			for outport in outports:
+				codelen = len(self.pathtoaction[sw][1][outport])
 
-			# init outputcode
-			outputcode = [1 for x in range(codelen)]
-			for i in range(codelen):
-				outputcode[i] = random.randint(0, 255)
-			
-			iscodewrong = 1
-			while iscodewrong :
-				tmpb = [0 for x in range(self.pathnum)]
+				# init outputcode
+				outputcode = [1 for x in range(codelen)]
+				
+				tmppathids = []
 				j = 0
-				#for () in self.pathtoaction[sw][1][outport]:
+				for inport in  self.pathtoaction[sw][1][outport]:
+					tmppathids.append(self.pathtoaction[sw][2][(inport, outport)])
+					j = j + 1
+				iscodewrong = 1
+				while iscodewrong :
+					for i in range(codelen):
+						outputcode[i] = random.randint(0, 255)
+					tmpb = [0 for x in range(self.pathnum)]
+					for j in range(codelen):
+						tmpb = self.cMulvAdd(tmpb, self.B[tmppathids[j][0]][tmppathids[j][1]], self.pathnum, outputcode[j])
+
+					for j in range(codelen):
+						e = self.mathmulti(tmpb, self.a[tmppathids[j][0]][tmppathids[j][1]], self.pathnum)
+						if e == 0:
+							iscodewrong = iscodewrong + 1
+							# code is not right, end this round 
+							break;
 
 
-		return
+					# code is fine 
+					for j in range(codelen):
+						(x,y) = tmppathids[j]
+						self.B[x][y] = tmpb
+						tmpa = deepcopy(self.a[x][y])
+						self.cDiv(tmpa, self.h, self.mathmulti(tmpb, self.a[x][y], self.h))
+						for  z  in range(self.pathnum):
+							tmpa1 = deepcopy(tmpa)
+							self.cMul(tmpa1, self.pathnum, self.mathmulti(tmpb, self.a[x][z], self.pathnum))
+							for u in range(self.pathnum):
+								self.a[x][z][u] = self.test.gfadd(self.a[x][z][u], tmpa1[u])
+					#finish change and finish this round
+					iscodewrong = 0
+				myswitch[(sw, outport)] = (outputcode, tmppathids)
+		return myswtich
 
 	def __CanculateNCAction(self):
-		return
+
+		actions = {}
+		# forwarding actions
+		for sw in self.pathtoaction.keys():
+			if sw != self.src[0][0]:
+				# node is not init node
+				for outport in self.pathtoaction[sw][1].keys():
+					inports = self.pathtoaction[sw][1][outport]
+					if len(inports) == 1:
+						# this is forwarding action
+						self.match_change.in_port = inports[0]
+						if actions.has_key((sw, self.match_change)):
+							actions[(sw, self.match_change)].actions.append(of.ofp_action_output(port = outport))
+						else:
+							msg = self.__initmsg(self.match_change)
+							msg.actions.append(of.ofp_action_output(port = outport))
+							actions[(sw, self.match_change)] = msg
+		# add encode node
+		# now can only support one nc app on switch
+		for (s, outport) in self.encode.keys():
+			(code, pathids) = self.encode[(s, outport)]
+			inports = self.pathtoaction[s][1][outport]
+			for i in range(len(inports)):
+				self.match_change.in_port = inports[i]
+				# here packet_len buffer_sized can futher improved
+
+				if actions.has_key((s, self.match_change)):
+					actions[(s, self.match_change)].actions.append(nc.nc_action_encode( \
+						buffer_id = 0, port_num = len(inports), \
+						port_id = i, buffer_size = 512, output_port = outport,\
+						packet_len = 1024, packet_num = len(inports), data = code))
+				else:
+					msg = self.__initmsg(self.match_change)
+					msg.actions.append(nc.nc_action_encode( \
+							buffer_id = 0, port_num = len(inports), \
+							port_id = i, buffer_size = 512, output_port = outport,\
+							packet_len = 1024, packet_num = len(inports), data = code))
+					actions[(s, msg.match)] = msg
+
+		# for decode
+		for i in range(self.dst):
+			dst = self.dst[i]
+			inports = []
+			for j in range(self.pathnum):
+				link = self.path[(i, j)][-1]
+				myinp = core.openflow_topology.link_to_port(link[1], link[0])
+				self.match_change.in_port = myinp
+				tmpoutport = dst[1]
+				if actions.has_key((dst[0], self.match_change)):
+					actions[(s, self.match_change)].actions.append(nc.nc_action_decode( \
+						buffer_id = 0, packet_num = self.path_num, \
+						output_port = tmpoutport, packet_len = 1024, \
+						port_id = j, buffer_size = 512))
+				else :
+					msg = self.__initmsg(self.match_change)
+					msg.actions.append(nc.nc_action_decode( \
+						buffer_id = 0, packet_num = self.path_num, \
+						output_port = tmpoutport, packet_len = 1024, \
+						port_id = j, buffer_size = 512))
+					actions[(s, msg.match)] = msg
+
+		# for init 
+		outports = []
+		tmpmatrix = []
+		for i in range(self.difflinks):
+			link = self.difflinks[i]
+			outports.append(link[1])
+			tmpmatrix.append(self.NCvector[self.pathnum][i])
+		msg = self.__initmsg(self.match)
+		msg.match.in_port = self.src[0][1]
+		msg.actions.append(nc.nc_action_init_coding( \
+				vector_off = 0, buffer_id = 0 + (shift << 7), packet_num = self.path_num, \
+				port_num = len(outports), packet_len = 1024, \
+				port_id = outports, vector = tmpmatrix))
+		if actions.has_key((self.src[0][0], msg.match)):
+			print "canculate is wrong"
+			raise Exception
+		else:
+			actions[(self.src[0][0], msg.match)] = msg
+		
+		return actions
 
 class CanculateCode():
 	def __init__(self, t, h = 2):
