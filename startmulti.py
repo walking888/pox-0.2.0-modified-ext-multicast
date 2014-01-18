@@ -1,7 +1,7 @@
 def launch ():
   from multicast.multicollect import launch
   launch()
-  from multicast.multitopo import launch
+  from multicast.multicast_route import launch
   launch()
   from topology import launch
   launch()

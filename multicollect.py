@@ -27,7 +27,7 @@ from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.util import dpid_to_str
 from pox.lib.util import str_to_bool
-from multitopo import *
+from multicast_route import *
 from pox.lib.packet import arp, ipv4, igmp
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.addresses import IPAddr, EthAddr
@@ -39,6 +39,41 @@ log = core.getLogger()
 # Can be overriden on commandline.
 _flood_delay = 0
 
+class Host_Tracker(object):
+	_core_name = "host_tracker"
+	# here we assume host can not move from a port to another without change MAC
+	# if this situation happens, controller will give the wrong direction
+	# that is any host connect to the network have a different MAC
+	def __init__(self):
+		self.host = {}  #use IP as a identify
+	
+	def add_host_and_location(self, mac_addr, dpid, port):
+		if mac_addr not in self.host.keys():
+			self.host[mac_addr] = (dpid, port)
+
+	def search_location(self, mac_addr):
+		try:
+			return self.host[mac_addr]
+		except:
+			return False
+
+class FlowInfo(object):
+	_core_name = "flow_info"
+	# here we assume two mac addr cannot have two flows
+	def __init__(self):
+		self.flows = {}
+	
+	def add_flows(self, src, dst, method):
+		self.flows[(src, dst)] = method
+	
+	def find_flows(self, src, dst):
+		try:
+			return self.flows[(src, dst)]
+		except:
+			return False
+	
+	def del_flows(self, src, dst):
+		self.flows.pop((src, dst))
 
 class GroupInfo (object):
 	_core_name = "group_info"
@@ -84,8 +119,12 @@ class GroupInfo (object):
 			[dst, g_id] = self.groups[group_ip]
 			if self.groupmethod.has_key(group_ip):
 				(cg_id, installtime,Mtree) = self.groupmethod[group_ip]
-				if cg_id == g_id and installtime + 2 > time.time() :
-					return (dst, 0)
+				if cg_id == g_id :
+					if installtime + 2 > time.time() :
+						return (dst, 0)
+					else :
+						# here means timeout is happened but topo do not change
+						return (dst, 2)
 		return (dst, 1)
 
 	def update_method(self, group_ip, method):
@@ -121,7 +160,23 @@ class LearningSwitch (object):
 		self.hold_down_expired = _flood_delay == 0
 
 		#log.debug("Initializing LearningSwitch, transparent=%s",
-		#					str(self.transparent))
+		#str(self.transparent))
+	
+	def _handle_FlowRemoved (self, event):
+		# now only nc_init can have this
+		flow_removed = event.ofp
+		try:
+			dst = flow_removed.match.nw_dst
+		except:
+			raise Exception
+		(f11, tree) = core.group_info.get_method(dst)
+		if f11 == 0 :
+			raise Exception
+		else:
+			print tree[0]['used_buffer']
+			for k in tree[0]['used_buffer'].keys():
+				for i in tree[0]['used_buffer'][k]:
+					core.openflow_topology.return_Buffer(k,i)
 
 	def _handle_PacketIn (self, event):
 		"""
@@ -133,20 +188,41 @@ class LearningSwitch (object):
 		def wdyHandleMulticast ():
 			dpid = event.dpid
 			port = event.port
-			src = [(dpid, port)]
+			src = (dpid, port)
 			ip_packet = packet.payload
+			if ip_packet.dstip == "224.224.224.224":
+				drop()
+				print "get a report packet!"
+				return
 			dst = []
 			(dst, flag) = core.group_info.has_in_group(ip_packet.dstip)
 			if flag == 0 :
 				# this means route canculate is no need to change just follow it
+				# but we need handle this packet
+				(f11, tree) = core.group_info.get_method(ip_packet.dstip)
+				if f11 == 0:
+					raise Exception
+				else :
+					try:
+						msg = tree[1][(dpid, event.port)]
+					except:
+						raise Exception
+					newmsg = of.ofp_packet_out(data = event.ofp)
+					newmsg.actions = msg.actions
+					self.connection.send(newmsg)
+				"""
 				drop()
+				"""
 				return 
 			if len(dst) is 0:
 				log.info("group is none")
 				return
-			match = of.ofp_match.from_packet(packet, event.port)
-			shift = core.group_info.get_g_id(ip_packet.dstip) % 2
-			tree = MulticastSPF(src=src, dst=dst, match=match)
+			#multicast_method = Static_NC_Multicast
+			multicast_method = Dijikstra_Normal_Multicast
+			#match = of.ofp_match.from_packet(packet, event.port)
+			#shift = core.group_info.get_g_id(ip_packet.dstip) % 2
+			multicast_method.multicast_Plan(src, dst, event, None)
+			tree = multicast_method.get_Results()
 			core.group_info.update_method(ip_packet.dstip, tree)
 
 		def wdyHandleIGMP ():
@@ -170,11 +246,7 @@ class LearningSwitch (object):
 					grouphaschange = core.group_info.del_in_group(groupAddr, dpid, port)
 			drop()
 			# require changes on dealing with grouphaschange
-
-
-
-
-
+			# need add functions
 
 
 
@@ -247,9 +319,9 @@ class LearningSwitch (object):
 					flood()
 			else:
 				flood()
-
-
-
+			"""
+			flood()
+			"""
 		else:
 			if packet.dst not in self.macToPort: # 4
 				flood("Port for %s unknown -- flooding" % (packet.dst,)) # 4a
@@ -291,6 +363,8 @@ def launch (transparent=False, hold_down=_flood_delay):
 
 	# register group_info module
 	core.registerNew(GroupInfo)
+	core.registerNew(Host_Tracker)
+	core.registerNew(FlowInfo)
 	"""
 	Starts an L2 learning switch.
 	"""
