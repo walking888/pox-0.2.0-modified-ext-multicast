@@ -31,6 +31,7 @@ from multicast_route import *
 from pox.lib.packet import arp, ipv4, igmp
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.addresses import IPAddr, EthAddr
+from pox.host_tracker import *
 import time
 
 log = core.getLogger()
@@ -39,50 +40,56 @@ log = core.getLogger()
 # Can be overriden on commandline.
 _flood_delay = 0
 
-class Host_Tracker(object):
-	_core_name = "host_tracker"
-	# here we assume host can not move from a port to another without change MAC
-	# if this situation happens, controller will give the wrong direction
-	# that is any host connect to the network have a different MAC
-	def __init__(self):
-		self.host = {}  #use IP as a identify
-	
-	def add_host_and_location(self, mac_addr, dpid, port):
-		if mac_addr not in self.host.keys():
-			self.host[mac_addr] = (dpid, port)
-
-	def search_location(self, mac_addr):
-		try:
-			return self.host[mac_addr]
-		except:
-			return False
-
 class FlowInfo(object):
 	_core_name = "flow_info"
 	# here we assume two mac addr cannot have two flows
-	def __init__(self):
+	def __init__(self, debug = 1):
 		self.flows = {}
+		self.all_flows = {}
+		self.debug = debug
 	
-	def add_flows(self, src, dst, method):
-		self.flows[(src, dst)] = method
+	def add_flows(self, match, method):
+		if self.debug:
+			log.debug("add flow :" + str(match.dl_src) + ">>" + str(match.dl_dst))
+			"""
+			try :
+				(method1, create_time) = self.flows[match]
+				print "have this flow already ***" + str(create_time) + "::" + str(time.time())
+				print match
+				print method1
+				print method
+			except:
+				pass
+			"""
+			#log.debug(method[1])
+		self.flows[match] = (method, time.time())
+		self.all_flows[match] = method
 	
-	def find_flows(self, src, dst):
+	def find_flows(self, match):
 		try:
-			return self.flows[(src, dst)]
+			(method, create_time) = self.flows[match]
+			if create_time + 2 >= time.time():
+				return (method,0)
+			else:
+				return (method,1)
 		except:
-			return False
+			return (None,2)
 	
-	def del_flows(self, src, dst):
-		self.flows.pop((src, dst))
+	def del_flows(self, match):
+		#print "flows:"
+		#print self.flows.keys()
+		self.flows.pop(match)
+		if self.debug:
+			log.debug("del flow :" + str(match.dl_src) + ">>" + str(match.dl_dst))
 
 class GroupInfo (object):
 	_core_name = "group_info"
 	def __init__(self, debug = 1):
 		self.groups = {}
-		self.groupmethod = {}
+		#self.groupmethod = {}
 		self.debug = debug
 
-	# return True means group info has changeed
+	# return True means group info has changed
 	def insert_in_group(self, group_ip, dpid, port):
 		if group_ip not in self.groups.keys():
 			self.groups[group_ip] = [[(dpid, port)], 0]
@@ -117,6 +124,12 @@ class GroupInfo (object):
 		dst = []
 		if group_ip in self.groups.keys():
 			[dst, g_id] = self.groups[group_ip]
+		return dst
+	"""
+	def has_in_group(self, group_ip):
+		dst = []
+		if group_ip in self.groups.keys():
+			[dst, g_id] = self.groups[group_ip]
 			if self.groupmethod.has_key(group_ip):
 				(cg_id, installtime,Mtree) = self.groupmethod[group_ip]
 				if cg_id == g_id :
@@ -131,17 +144,35 @@ class GroupInfo (object):
 		[groupPort, g_id] = self.groups[group_ip]
 		self.groupmethod[group_ip] = (g_id, time.time(),method)
 
+	def removed_method(self, group_ip):
+		self.groupmethod.pop(group_ip)
+		
 	# return (flag, method)
 	# if flag = 0, method = null
 	def get_method(self, group_ip):
 		if self.groupmethod.has_key(group_ip):
 			return (1,self.groupmethod[group_ip][2])
 		else :
-			return	(0,)
-	
+			return	(0,None)
+	"""
 	def get_g_id(self, group_ip):
 		[groupPort, g_id] = self.groups[group_ip]
 		return g_id
+
+def extract_match(tmp):
+	match = of.ofp_match()
+	match.dl_type = tmp.dl_type
+	match.dl_src = tmp.dl_src
+	match.dl_dst = tmp.dl_dst
+	match.nw_src = tmp.nw_src
+	match.nw_dst = tmp.nw_dst
+	match.nw_proto = tmp.nw_proto
+	match.tp_src = tmp.tp_src
+	match.tp_dst = tmp.tp_dst
+	return match
+
+IP_NC_MULTICAST_BOTTOM = IPAddr("224.1.0.0").toUnsigned()
+IP_NC_MULTICAST_TOP = IPAddr("224.1.255.255").toUnsigned()
 
 class LearningSwitch (object):
 	def __init__ (self, connection, transparent):
@@ -165,18 +196,28 @@ class LearningSwitch (object):
 	def _handle_FlowRemoved (self, event):
 		# now only nc_init can have this
 		flow_removed = event.ofp
-		try:
-			dst = flow_removed.match.nw_dst
-		except:
-			raise Exception
-		(f11, tree) = core.group_info.get_method(dst)
-		if f11 == 0 :
-			raise Exception
-		else:
-			print tree[0]['used_buffer']
-			for k in tree[0]['used_buffer'].keys():
-				for i in tree[0]['used_buffer'][k]:
-					core.openflow_topology.return_Buffer(k,i)
+		mac_dst = flow_removed.match.dl_dst
+		#print "flow_removed.match"  + str(flow_removed.match)
+		match = extract_match(flow_removed.match)
+
+		# here deal with buffer reuse
+		if mac_dst.is_multicast:
+			try:
+				dst = flow_removed.match.nw_dst
+			except:
+				raise Exception
+			(tree,flag) = core.flow_info.find_flows(match)
+			if flag == 2:
+				raise Exception
+			else:
+				#print tree[0]['used_buffer']
+				if 'used_buffer' in tree[0].keys():
+					# this is nc and use buffers
+					for k in tree[0]['used_buffer'].keys():
+						for i in tree[0]['used_buffer'][k]:
+							core.openflow_topology.return_Buffer(k,i)
+		# here delete flow info
+		core.flow_info.del_flows(match)
 
 	def _handle_PacketIn (self, event):
 		"""
@@ -188,28 +229,40 @@ class LearningSwitch (object):
 		def wdyHandleMulticast ():
 			dpid = event.dpid
 			port = event.port
-			src = (dpid, port)
+			#src = (dpid, port)
+			# in order to deal with flow remove in the middle of the transmission
+			macentry = core.host_tracker.getMacEntry(packet.src) # 4
+			if macentry == None:
+				log.warning("donot track this src %s",packet.src)
+				raise Exception
+			mmsrc = (macentry.dpid, macentry.port)
 			ip_packet = packet.payload
 			if ip_packet.dstip == "224.224.224.224":
+				#log.info("get a packet!")
+				log.debug("get statistic from host(%i,%i):"+ str(ip_packet.payload.payload),dpid,port)
+				#log.debug("get statistic from host(%i,%i):%s",dpid,port,ip_packet.payload)
 				drop()
-				print "get a report packet!"
 				return
-			dst = []
-			(dst, flag) = core.group_info.has_in_group(ip_packet.dstip)
+			dst = core.group_info.has_in_group(ip_packet.dstip)
+			match = extract_match(of.ofp_match.from_packet(packet))
+			(tree, flag) = core.flow_info.find_flows(match)
 			if flag == 0 :
 				# this means route canculate is no need to change just follow it
 				# but we need handle this packet
-				(f11, tree) = core.group_info.get_method(ip_packet.dstip)
-				if f11 == 0:
+				try:
+					#print tree[1]
+					msg = tree[1][(dpid, event.port)]
+				except:
 					raise Exception
-				else :
-					try:
-						msg = tree[1][(dpid, event.port)]
-					except:
-						raise Exception
-					newmsg = of.ofp_packet_out(data = event.ofp)
-					newmsg.actions = msg.actions
-					self.connection.send(newmsg)
+				newmsg = of.ofp_packet_out()
+				newmsg.data = event.ofp
+				newmsg.in_port = event.port
+				newmsg.actions = msg.actions
+				s = ''
+				for a in msg.actions:
+					s += str(a)
+				log.debug("get a packet no need to canculate!"+ s)
+				self.connection.send(newmsg)
 				"""
 				drop()
 				"""
@@ -217,13 +270,19 @@ class LearningSwitch (object):
 			if len(dst) is 0:
 				log.info("group is none")
 				return
-			#multicast_method = Static_NC_Multicast
-			multicast_method = Dijikstra_Normal_Multicast
+			kkk = ip_packet.dstip.toUnsigned()
+			#print "top,bottom:"+str(IP_NC_MULTICAST_TOP)+","+str(IP_NC_MULTICAST_BOTTOM)
+			#print "kkk:"+str(kkk)
+			if kkk >= IP_NC_MULTICAST_BOTTOM and kkk <= IP_NC_MULTICAST_TOP:
+				multicast_method = Static_NC_Multicast
+				#print "use NC"
+			else:
+				multicast_method = Dijikstra_Normal_Multicast
 			#match = of.ofp_match.from_packet(packet, event.port)
 			#shift = core.group_info.get_g_id(ip_packet.dstip) % 2
-			multicast_method.multicast_Plan(src, dst, event, None)
+			multicast_method.multicast_Plan(mmsrc, dst, event, None)
 			tree = multicast_method.get_Results()
-			core.group_info.update_method(ip_packet.dstip, tree)
+			core.flow_info.add_flows(match, tree)
 
 		def wdyHandleIGMP ():
 			ip_packet = packet.payload
@@ -269,7 +328,8 @@ class LearningSwitch (object):
 				# this to OFPP_ALL.
 				msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
 			else:
-				pass
+				msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
+				# pass
 				#log.info("Holding down flood for %s", dpid_to_str(event.dpid))
 			msg.data = event.ofp
 			msg.in_port = event.port
@@ -296,7 +356,7 @@ class LearningSwitch (object):
 				msg.in_port = event.port
 				self.connection.send(msg)
 
-		self.macToPort[packet.src] = event.port # 1
+		#self.macToPort[packet.src] = event.port # 1
 
 		if not self.transparent: # 2
 			if packet.type == packet.LLDP_TYPE or packet.dst.isBridgeFiltered():
@@ -323,27 +383,43 @@ class LearningSwitch (object):
 			flood()
 			"""
 		else:
-			if packet.dst not in self.macToPort: # 4
+			macentry = core.host_tracker.getMacEntry(packet.dst) # 4
+			dpid = event.dpid
+			port = event.port
+			if macentry == None:
 				flood("Port for %s unknown -- flooding" % (packet.dst,)) # 4a
 			else:
-				port = self.macToPort[packet.dst]
-				if port == event.port: # 5
-					# 5a
-					log.warning("Same port for packet from %s -> %s on %s.%s.	Drop."
-							% (packet.src, packet.dst, dpid_to_str(event.dpid), port))
-					drop(10)
-					return
-				# 6
-				log.debug("installing flow for %s.%i -> %s.%i" %
-						(packet.src, event.port, packet.dst, port))
-				msg = of.ofp_flow_mod()
-				msg.match = of.ofp_match.from_packet(packet, event.port)
-				msg.idle_timeout = 10
-				msg.hard_timeout = 30
-				msg.actions.append(of.ofp_action_output(port = port))
-				msg.data = event.ofp # 6a
-				self.connection.send(msg)
-
+				mmdst = (macentry.dpid, macentry.port)
+				match = of.ofp_match.from_packet(packet)
+				match = extract_match(match)
+				method = core.flow_info.find_flows(match)
+				if type(method) != int:
+					macentry = core.host_tracker.getMacEntry(packet.src) # this information is at record
+					mmsrc = (macentry.dpid, macentry.port)
+					#print("event packet_in mmsrc:%s; mmdst:%s;event:%d,%d",str(mmsrc),str(mmdst),dpid, port)
+					#print "src:" + str(packet.src) + ";dst:"+str(packet.dst)
+					if mmsrc != (dpid, port):
+						# some problem of locating host, packet flood anywhere
+						mmsrc = (dpid, port)
+						Dijikstra_Normal_Multicast.multicast_Plan(mmsrc, [mmdst], event, None, False)
+					else:
+						Dijikstra_Normal_Multicast.multicast_Plan(mmsrc, [mmdst], event, None)
+						tree = Dijikstra_Normal_Multicast.get_Results()
+						core.flow_info.add_flows(match, tree)
+				else:
+					# this flow is build just follow it
+					try:
+						msg = method[1][(dpid, port)]
+					except:
+						log.debug(method[1])
+						log.debug("dp:" + str(dpid) +";port:"+ str(port))
+						print 1
+						raise Exception
+					newmsg = of.ofp_packet_out(data = event.ofp)
+					newmsg.in_port = port
+					newmsg.actions = msg.actions
+					self.connection.send(newmsg)
+					log.debug("send a output packet!")
 
 class l2_learning (object):
 	"""
@@ -363,7 +439,6 @@ def launch (transparent=False, hold_down=_flood_delay):
 
 	# register group_info module
 	core.registerNew(GroupInfo)
-	core.registerNew(Host_Tracker)
 	core.registerNew(FlowInfo)
 	"""
 	Starts an L2 learning switch.

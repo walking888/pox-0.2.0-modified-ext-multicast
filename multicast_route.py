@@ -101,6 +101,7 @@ class OpenFlowTopology_Improve1(OpenFlowTopology, Topo_Abstract):
 			self.__add_adjacent(self.adjacent, link.dpid1, link.dpid2)
 		elif event.removed:
 			self.__del_adjacent(self.adjacent, link.dpid1, link.dpid2)
+		#print self.adjacent
 	def _handle_openflow_ConnectionUp(self, event):
 		OpenFlowTopology._handle_openflow_ConnectionUp(self, event)
 		self.adjacent[event.dpid] = []
@@ -145,16 +146,27 @@ def get_buffer_id(*args):
 # l_normal_action_forward\ l_nc_action_forward
 def create_msg(match):
 	msg = of.ofp_flow_mod()
-	msg.idle_timeout = 10
-	msg.hard_timeout = 120
+	msg.idle_timeout = 3
+	msg.hard_timeout = 0
 	msg.match = deepcopy(match)
 	return msg
 
 def actions_add(a, s, msg):
 	try:
 		a[(s, msg.match.in_port)].actions.extend(msg.actions)
+		print "an action is extend to another!"
+		print msg.match
+		print str(s)
 	except:
 		a[(s, msg.match.in_port)] = msg
+		"""
+		k = (s, msg.match.in_port)
+		print k
+		ss = ""
+		for act in msg.actions:
+			ss += str(act)
+		print "	"+ ss
+		"""
 
 def l_normal_action_forward(paths):
 	def switches_add(a, s, inp, outp):
@@ -173,15 +185,16 @@ def l_normal_action_forward(paths):
 		for p in ps:
 			last_p = paths['src'][1]
 			for l in p:
-				port = core.openflow_topology.link_to_Port(l[0], l[1])
+				port = paths['link-to-port'](l[0], l[1])
 				switches_add(x, l[0], last_p, port)
-				last_p = core.openflow_topology.link_to_Port(l[1], l[0])
+				last_p = paths['link-to-port'](l[1], l[0])
 			# add dst
 			for p  in paths['port'][k[1]]:
 				switches_add(x, l[1], last_p, p)
 	
-	for (s, inp, outp) in paths['add_forward']:
-		switches_add(x, s, inp, outp)
+	for (s, inp, outps) in paths['add_forward']:
+		for outp in outps:
+			switches_add(x, s, inp, outp)
 
 	actions = {}
 	for s in x.keys():
@@ -232,18 +245,24 @@ def l_nc_action_forward(paths):
 			for l in p:
 				# link has src is init node
 				if last_p != 99999:
-					port = core.openflow_topology.link_to_Port(l[0], l[1])
+					port = paths['link-to-port'](l[0], l[1])
 					# link in encode link need encode so ignore them
 					if l not in paths['encode_link']:
 						switches_add(x, l[0], last_p, port)
-				last_p = core.openflow_topology.link_to_Port(l[1], l[0])
+				last_p = paths['link-to-port'](l[1], l[0])
 			# here dst is ignored because of decode
 
-	for (s, inp, outp) in paths['add_forward']:
-		switches_add(x, s, inp, outp)
+	# remove the same port from the same inport
+	for s in x.keys():
+		for inp in x[s].keys():
+			x[s][inp] = {}.fromkeys(x[s][inp]).keys()
 
 	actions = {}
 	for s in x.keys():
+		"""
+		if s == 9:
+			print x[s]
+		"""
 		for inp in x[s].keys():
 			outps = x[s][inp]
 			msg = create_msg(paths['shift_match'])
@@ -254,6 +273,13 @@ def l_nc_action_forward(paths):
 	#print "forward_actions"
 	#print actions
 	#print x
+	for (s, inp, outps) in paths['add_forward']:
+		msg = create_msg(paths['match'])
+		msg.match.in_port = inp
+		for outp in outps:
+			msg.actions.append(of.ofp_action_output(port = outp))
+		actions_add(actions, s, msg)
+
 	return actions
 
 NCvector = {}
@@ -289,9 +315,8 @@ def add_used_buffer(paths, s, bid):
 def l_static_action_init(paths):
 	outps = []
 	for l in paths['init_link']:
-		outps.append(core.openflow_topology.link_to_Port(l[0], l[1]))
+		outps.append(paths['link-to-port'](l[0], l[1]))
 	msg = create_msg(paths['match'])
-	msg.flags = 1
 	msg.match.in_port = paths['src'][1]
 	b_id = get_buffer_id(paths['a_src'])
 	msg.actions.append(nc.nc_action_init_coding(vector_off = 0,
@@ -310,10 +335,9 @@ def l_random_get_init_code(paths):
 def l_random_action_init(paths):
 	outps = []
 	for l in paths['init_link']:
-		outps.append(core.openflow_topology.link_to_Port(l[0],l[1]))
+		outps.append(paths['link-to-port'](l[0],l[1]))
 	msg = create_msg(paths['match'])
 	msg.match.in_port = paths['src'][1]
-	msg.flags = 1
 	b_id = get_buffer_id(paths['a_src'])
 	msg.actions.append(nc.nc_action_init_coding(vector_off = 0, 
 		buffer_id = b_id, packet_num = path['path_num'], port_num = len(outps),
@@ -348,10 +372,11 @@ def l_static_get_encode_code(paths):
 	for l in paths['encode_link']:
 		code_len = len(paths['encode_relate'][l])
 		outputcode = [nc_func.get_I() for x in range(code_len)]
-		iscodewrong = 1
-		while iscodewrong:
+		if 0:
 			for i in range(code_len):
 				outputcode[i] = nc_func.random_Num()
+		iscodewrong = 1
+		while iscodewrong:
 			tmpb = [0 for x in range(path_num)]
 			for j in range(code_len):
 				(x,y,zzz) = paths['encode_relate'][l][j]
@@ -361,6 +386,8 @@ def l_static_get_encode_code(paths):
 				if e == 0:
 					iscodewrong = iscodewrong + 1
 					break
+			for i in range(code_len):
+				outputcode[i] = nc_func.random_Num()
 
 			# code is fine 
 			for j in range(code_len):
@@ -382,11 +409,11 @@ def l_static_action_encode(paths):
 	for l in paths['encode_link']:
 		in_num = len(paths['encode_relate'][l])
 		i = 0
-		outport = core.openflow_topology.link_to_Port(l[1], l[0])
+		outport = paths['link-to-port'](l[0], l[1])
 		b_id = get_buffer_id(l[0])
 		for (x,y,z) in paths['encode_relate'][l]:
 			msg = create_msg(paths['shift_match'])
-			msg.match.inport = z
+			msg.match.in_port = z
 			msg.actions.append(nc.nc_action_encode(buffer_id = b_id, port_num = in_num,
 				port_id = i, buffer_size = 512, output_port = outport, packet_len = 1024,
 				packet_num = in_num, data = paths['encode_code'][l]))
@@ -403,7 +430,7 @@ def l_random_action_encode(paths):
 	for l in paths['encode_link']:
 		in_num = len(paths['encode_relate'][l])
 		i = 0
-		outport = core.openflow_topology.link_to_Port(l[1], l[0])
+		outport = paths['link-to-port'](l[0], l[1])
 		b_id = get_buffer_id(l[0])
 		for (x,y,z) in paths['encode_relate'][l]:
 			msg = create_msg(paths['shift_match'])
@@ -423,7 +450,7 @@ def l_action_decode(paths):
 		ins = []
 		for path in paths['paths'][(paths['a_src'],k)]['path']:
 			l = path[-1]
-			ins.append(core.openflow_topology.link_to_Port(l[1], l[0]))
+			ins.append(paths['link-to-port'](l[1], l[0]))
 		b_id = get_buffer_id(k)
 		for i in range(len(ins)):
 			msg = create_msg(paths['shift_match'])
@@ -479,12 +506,16 @@ class Multicast_Abstract():
 		self.path_algorithm = ops['path_algorithm']
 	# get_Paths\ get_Actions\ install_Actions 
 	# here src is a tuple and dst is a tuple list
-	def multicast_Plan(self, src, dst, event, prune_restrain):
+	def multicast_Plan(self, src, dst, event, prune_restrain, isrecord=True):
 		paths = {}
 		paths['src'] = src
 		paths['dst'] = dst
 		paths['event'] = event
 		paths['match'] = of.ofp_match.from_packet(event.parsed, event.port)
+		if aaa_test_or_not:
+			paths['link-to-port'] = my_test.topo.link_to_Port
+		else:
+			paths['link-to-port'] = core.openflow_topology.link_to_Port
 		return paths
 
 	def get_Results(self):
@@ -517,33 +548,37 @@ class Multicast_Abstract():
 	def prune_Topo(self, topo, prune_restrain):
 		return topo
 	
-	def install(self, actions, src, event):
+	def install(self, actions, src, event, isrecord):
 		# we must make sure every action is at its right order
 		# here because init encode and decode action is custom actions
 		# we make the custom actions at the right place to make it right
 		"""
 		for  (sw, match) in actions.keys():
 			msg = actions[(sw, match)]
-			print match
 			print 's port actions:' + str(sw) + ' ' + str(match)
 			s = ''
 			for a in msg.actions:
 				s += str(a)
 			print s 
+		print "send a msg. src:" + str(src)
 		"""
+		#print actions
 		tmpmsg = None
-		for (sw,match) in actions.keys():
-			if sw != src:
-				s = core.openflow_topology.topology.getEntityByID(sw)
-				msg = actions[(sw,match)]
+		for k in actions.keys():
+			if k != src:
+				s = core.openflow_topology.topology.getEntityByID(k[0])
+				msg = actions[k]
 				s._connection.send(msg)
 			else:
-				tmpmsg = actions[(sw, match)]
+				tmpmsg = actions[k]
 		# last send the src actions to start the flow
 		if tmpmsg != None:
-			s = core.openflow_topology.topology.getEntityByID(src)
+			s = core.openflow_topology.topology.getEntityByID(src[0])
 			tmpmsg.data = event.ofp
+			if isrecord:
+				tmpmsg.flags = 1
 			s._connection.send(tmpmsg)
+			#print "send src:" + str(src) + ", msg:"+str(tmpmsg)
 		
 
 	def error_Handle(self, *args):
@@ -551,7 +586,7 @@ class Multicast_Abstract():
 		raise Exception
 
 class Normal_Multicast(Multicast_Abstract):
-	def multicast_Plan(self, src, dst, event, prune_restrain):
+	def multicast_Plan(self, src, dst, event, prune_restrain, isrecord=True):
 		paths = Multicast_Abstract.multicast_Plan(self, src, dst, event, prune_restrain)
 		port = self.before_Start(paths)
 		tmptopo = self.prune_Topo(core.openflow_topology, prune_restrain)
@@ -560,7 +595,7 @@ class Normal_Multicast(Multicast_Abstract):
 		else:
 			paths['path'] = self.path_algorithm.get_Paths(tmptopo, paths['a_src'], paths['a_dst'])
 		actions = self.action_forward(paths)
-		self.install(actions, src, paths['event'])
+		self.install(actions, src, paths['event'], isrecord)
 		self.paths = paths
 		self.actions = actions
 
@@ -568,9 +603,7 @@ Dijikstra_Normal_Multicast = Normal_Multicast(Dijikstra_Multicast_ops)
 
 class NC_Multicast(Multicast_Abstract):
 	def __init__(self, ops):
-		self.ops = ops
-		self.action_forward = ops['action_forward']
-		self.path_algorithm = ops['path_algorithm']
+		Multicast_Abstract.__init__(self)
 		self.get_init_code = ops['get_init_code']
 		self.action_init = ops['action_init']
 		self.change_match = ops['change_match']
@@ -589,22 +622,24 @@ class NC_Multicast(Multicast_Abstract):
 			links = []
 			n = topo.get_Neighbours(d)
 			tmp = d
-			flag = len(n) - 1
+			flag = len(n) > 1
 			while not flag:
 				links.append((n[0], tmp))
 				tmp1 = tmp
 				tmp = n[0]
-				n = topo.get_Neigbours(tmp)
+				n = deepcopy(topo.get_Neighbours(tmp))
+				#print "topo:" + str(topo.adjacent)
+				#print "n:" + str(n) + ";tmp1:"+ str(tmp1)
 				n.remove(tmp1)
 				flag = len(n) > 1 or tmp == src
 			if tmp != d:
 				links.reverse()
-				inport = core.openflow_topology.link_to_Port(links[0][1], links[0][0])
+				inport = paths['link-to-port'](links[0][1], links[0][0])
 				for l in links[1:]:
-					t.append((l[0],inport,[core.openflow_topology.link_to_Port(l[0],l[1])]))
-					inport = core.openflow_topology.link_to_Port(l[1],l[0])
+					t.append((l[0],inport,[paths['link-to-port'](l[0],l[1])]))
+					inport = paths['link-to-port'](l[1],l[0])
 				t.append((d,inport,paths['port'][d]))
-				outport = core.openflow_topology.link_to_Port(links[0][0], links[0][1])
+				outport = paths['link-to-port'](links[0][0], links[0][1])
 				if tmp != src:
 					tmpdst.append((tmp,outport))
 				else:
@@ -624,56 +659,63 @@ class NC_Multicast(Multicast_Abstract):
 		paths['port'] = port
 
 		# improve src
-		n = topo.get_Neighbours(src)
-		flag = len(n) - 1
-		links = []
-		tmp = src
-		while not flag:
-			links.append(tmp, n[0])
-			tmp1 = tmp
-			tmp = n[0]
-			n = topo.get_Neighbours(tmp)
-			n.remove(tmp1)
-			flag = len(n) > 1 or tmp in paths['a_dst']
-		if tmp != src:
-			inport = paths['src'][1]
-			for l in links:
-				t.append(l[0], inport, [core.openflow_topology.link_to_Port(l[0], l[1])])
-				inport = core.openflow_topology.link_to_Port(l[1],l[0])
-			paths['src'] = (l[1], inport)
-			paths['a_src'] = l[1]
-			if l[1] in port.keys():
-				t.append((l[1], inport, port[l[1]]))
-				ps = paths['port'].pop(l[1])
-				paths['a_dst'].remove(l[1])
-				for p in ps:
-					paths['dst'].remove((l[1], p))
+		if len(paths['a_dst']) != 0:
+			# need to route
+			n = topo.get_Neighbours(src)
+			tmp = src
+			flag = len(n) - 1
+			links = []
+			while not flag:
+				links.append((tmp, n[0]))
+				tmp1 = tmp
+				tmp = n[0]
+				n = deepcopy(topo.get_Neighbours(tmp))
+				n.remove(tmp1)
+				flag = len(n) > 1 or tmp in paths['a_dst']
+			if tmp != src:
+				inport = paths['src'][1]
+				for l in links:
+					t.append(l[0], inport, [paths['link-to-port'](l[0], l[1])])
+					inport = paths['link-to-port'](l[1],l[0])
+				paths['src'] = (l[1], inport)
+				paths['a_src'] = l[1]
+				if l[1] in port.keys():
+					t.append((l[1], inport, port[l[1]]))
+					ps = paths['port'].pop(l[1])
+					paths['a_dst'].remove(l[1])
+					for p in ps:
+						paths['dst'].remove((l[1], p))
 
-	def multicast_Plan(self, src, dst, event, prune_restrain):
+		paths['add_forward'].extend(t)
+
+	def multicast_Plan(self, src, dst, event, prune_restrain, isrecord=True):
 		paths = Multicast_Abstract.multicast_Plan(self, src, dst, event, prune_restrain)
 		self.before_Start(paths)
 		tmptopo = self.prune_Topo(core.openflow_topology, prune_restrain)
 		self.before_Start_After_Prune(paths, tmptopo)
 		paths['paths'] = self.path_algorithm.get_Paths(tmptopo, paths['a_src'], paths['a_dst'])
-		self.order_Path(paths)
-		self.find_Encode_Node(paths)
-		if not self.code_Order(paths):
-			print "have cycles in encode links"
-			self.error_Handle(src, dst, event, prune_restrain)
-		self.change_match(paths)
-		if not self.get_init_code(paths):
-			print "init wrong, mainly because of too much outlinks of src"
-			self.error_Handle(src, dst, event, prune_restrain)
-		self.get_encode_code(paths)
+		if len(paths['a_dst']) != 0:
+			self.order_Path(paths)
+			self.find_Encode_Node(paths)
+			if not self.code_Order(paths):
+				print "have cycles in encode links"
+				self.error_Handle(src, dst, event, prune_restrain)
+			self.change_match(paths)
+			if not self.get_init_code(paths):
+				print "init wrong, mainly because of too much outlinks of src"
+				self.error_Handle(src, dst, event, prune_restrain)
+			self.get_encode_code(paths)
 		self.paths = paths
 		# here because a same match from a same switch can not generate two actions, so we just update
 		actions = self.action_forward(paths)
-		paths['used_buffer'] = {}
-		actions.update(self.action_init(paths))
-		actions.update(self.action_encode(paths))
-		actions.update(self.action_decode(paths))
+		if len(paths['a_dst']) != 0:
+			paths['used_buffer'] = {}
+			actions.update(self.action_init(paths))
+			actions.update(self.action_encode(paths))
+			actions.update(self.action_decode(paths))
 		self.actions = actions
-		self.install(actions, src[0], paths['event'])
+		self.install(actions, src, paths['event'], isrecord)
+		#print paths
 
 	def order_Path(self, paths):
 		ps = paths['paths']
@@ -704,7 +746,7 @@ class NC_Multicast(Multicast_Abstract):
 				tmpl = p[0]
 				# the link has src cannot be the encode link
 				for l in p[1:]:
-					port = core.openflow_topology.link_to_Port(tmpl[1], tmpl[0])
+					port = paths['link-to-port'](tmpl[1], tmpl[0])
 					try:
 						links[l]
 						try:

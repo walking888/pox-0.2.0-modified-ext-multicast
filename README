@@ -3,6 +3,7 @@ POX:
   Put igmp.py in pox/pox/lib/packet
   Put this dir in pox/ext/
   Start this module by ./pox.py multicast.startmulti
+  If you want see collected statistics, use ./pox.py multicast.startmulti log.level --mutlicast.multicollect=DEBUG
 
 Mininet:
 

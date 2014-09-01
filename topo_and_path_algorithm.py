@@ -3,7 +3,7 @@ import inspect, os
 from copy import deepcopy
 import random
 import exceptions
-
+import pdb
 
 class Topo_Abstract(object):
 	def __init__(self):
@@ -17,6 +17,11 @@ class Topo_Abstract(object):
 	def get_Neighbours(self, u):
 		return self.adjacent[u]
 
+	def add_Link(self, link):
+		try:
+			self.adjacent[link[0]].index(link[1])
+		except:
+			self.adjacent[link[0]].append(link[1])
 
 class Gen_Topo(Topo_Abstract):
 	def __init__(self, file_path):
@@ -32,6 +37,9 @@ class Gen_Topo(Topo_Abstract):
 		else :
 			print "file is not topgen file!"
 			raise Exception
+
+	def link_to_Port(self, a, b):
+		return b
 
 	def _getTopoBrite(self):
 		"""
@@ -139,7 +147,7 @@ class Level_Topo(Topo_Abstract):
 	def level_Topo(self, myt):
 		level_topo = {}
 		for u in myt.get_All_Nodes():
-			level_topo[u] = [self.OUTRANGE,myt.get_Neighbours(u)]
+			level_topo[u] = [self.OUTRANGE,deepcopy(myt.get_Neighbours(u))]
 		step = 0
 		level_topo[self.src][0] = step
 		new_add_node = [self.src]
@@ -270,11 +278,15 @@ def always_One(link):
 	return 1
 
 
-weight_states = {}
-
+min_cost_weight_states = {}
 def change_Weight(link):
-	return weight_states['change_weight'][link]
+	try:
+		min_cost_weight_states['change_weight'][link]
+	except:
+		print min_cost_weight_states
+	return min_cost_weight_states['change_weight'][link]
 
+weight_states = {}
 def add_Link_Weight(link):
 	if link in weight_states['change_weight'].keys():
 		return weight_states['change_weight'][link][0]
@@ -298,6 +310,8 @@ class Path_Algorithm_Abstract(object):
 	def set_Weight(self, gw):
 		self.get_Weight = gw
 	
+	def get_Weight_Algorithm(self):
+		return self.get_Weight
 # here dst is list
 class Topo_to_Path(Path_Algorithm_Abstract):
 	# this function must be rewrite 
@@ -428,9 +442,10 @@ class One_to_One_Multipath(Path_Algorithm_Abstract):
 
 		
 		# success find num path
-		# print tmppaths
+		#print src, dst
+		#print tmppaths
 		paths[(src,dst)]['path'] = self.delete_Reverse_Link(tmppaths, src, dst)
-
+		#print paths[(src, dst)]['path']
 		self.set_Weight(weight_states['get_weight'])
 		return paths
 
@@ -442,15 +457,17 @@ class One_to_One_Multipath(Path_Algorithm_Abstract):
 			except:
 				weight_states['change_weight'][rev_link] = [self.get_Weight(link)]
 				# add_link is in topo?
-				# here is bidirectional path , so topo connection is not change
 				# we just change weight to reflect this delete link
 				if link[0] in topo.get_Neighbours(link[1]):
 					# in the topo
 					weight_states['change_weight'][rev_link].append(self.get_Weight(rev_link))
+				else:
+					# reverse link is not at topo, we must add it
+					topo.add_Link(rev_link)
 				
 			if link in weight_states['change_weight'].keys():
 				weight_states['change_weight'][link].pop(0)
-				if len(change_weight[link]) == 0:
+				if len(weight_states['change_weight'][link]) == 0:
 					weight_states['change_weight'][link].append(self.MAX_WEIGHT)
 			else:
 				weight_states['change_weight'][link] = [self.MAX_WEIGHT]
@@ -459,6 +476,9 @@ class One_to_One_Multipath(Path_Algorithm_Abstract):
 
 	def set_Weight(self, gw):
 		self.path_algorithm.set_Weight(gw)
+
+	def get_Weight_Algorithm(self):
+		return self.path_algorithm.get_Weight
 
 	def delete_Reverse_Link(self, paths, src, dst):
 		xxx = {}
@@ -479,14 +499,14 @@ class One_to_One_Multipath(Path_Algorithm_Abstract):
 		# now change the topo to paths
 		# because is disjoint path so we can simplify the procedure
 		result = []
-		# print xxx
 		for u in xxx[tmpsrc]:
 			yyy = [(tmpsrc, u)]
 			v = u
 			while  v != tmpdst:
 				v = xxx[u][0]
 				yyy.append((u,v))
-				u = v		
+				xxx[u].remove(v)
+				u = v
 			result.append(yyy)
 
 		return result
@@ -499,6 +519,7 @@ class Max_Flow(Path_Algorithm_Abstract):
 		self.src = src
 		self.levelt = Level_Topo(topo, src)
 		paths = {}
+		self.topo = topo
 		paths[(src, dst)] = {}
 		paths[(src, dst)]['path'] = self.max_Flows(dst)
 		if paths[(src, dst)]['path'] == None:
@@ -563,6 +584,17 @@ class Max_Flow(Path_Algorithm_Abstract):
 				except:
 					# no reverse link
 					switches[link[0]].append(link[1])
+		"""
+		#print d
+		#print self.levelt.levelt
+		#print switches
+		#print path
+		try:
+			switches[self.src]
+		except:
+			print self.topo.adjacent
+			raise Exception
+		"""
 		path = []
 		while len(switches[self.src]):
 			link = []
@@ -577,7 +609,7 @@ class Max_Flow(Path_Algorithm_Abstract):
 class One_to_Many_NC(One_to_One_Multipath):
 	def __init__(self, a):
 		self.path_algorithm = a
-		self.get_Weight = a.get_Weight
+		self.get_Weight = a.get_Weight_Algorithm()
 		self.flag_improve = 1
 
 	def set_Is_Improve(self, flag):
@@ -585,6 +617,8 @@ class One_to_Many_NC(One_to_One_Multipath):
 		
 	def get_Paths(self, topo, src, dst):
 		paths = {}
+		if len(dst) == 0:
+			return paths
 		min_num = 999
 		path_num = {}
 		for d in dst:
@@ -622,7 +656,11 @@ class One_to_Many_NC(One_to_One_Multipath):
 							tmptopo[u].append(v)
 						except:
 							tmptopo[u] = [v]
-				tmptopo[v] = []
+					try:
+						tmptopo[v]
+					except:
+						tmptopo[v] = []
+			#print tmptopo
 		return Dict_Topo(tmptopo)
 	
 	def zero_One_Weight(self, paths, my_src, ps1, ps2):
@@ -632,7 +670,6 @@ class One_to_Many_NC(One_to_One_Multipath):
 			for path in path_list:
 				for link in path:
 					weight[link] = 0
-		"""
 		for d in ps2:
 			path_list = paths[(my_src, d)]['path']
 			for path in path_list:
@@ -641,32 +678,43 @@ class One_to_Many_NC(One_to_One_Multipath):
 						weight[link]
 					except:
 						weight[link] = 1
-		"""
 		return weight
 
 
 	def min_Local(self, paths, my_src, d1, d2):
+		#print d1, d2
+		#print paths
 		paths_num = len(paths[(my_src, d1)]['path'])
 		tmptopo = self.get_Mixed_Topo(paths, my_src, [d1, d2])
-		weight_states['change_weight'] = self.zero_One_Weight(paths, my_src, [d1], [d2])
+		min_cost_weight_states['change_weight'] = {}
+		min_cost_weight_states['change_weight'].update(self.zero_One_Weight(paths, my_src, [d1], [d2]))
 		tmp_paths = self.path_algorithm.get_Paths(tmptopo, my_src, d2)
+		#print tmp_paths
 		paths[(my_src, d2)]['path'] = tmp_paths[(my_src, d2)]['path']
+		#print paths
 		tmptopo = self.get_Mixed_Topo(paths, my_src, [d1, d2])
-		weight_states['change_weight'] = self.zero_One_Weight(paths, my_src, [d2], [d1])
+		min_cost_weight_states['change_weight'].clear()
+		min_cost_weight_states['change_weight'] = self.zero_One_Weight(paths, my_src, [d2], [d1])
+		#print tmptopo.adjacent
+		#print min_cost_weight_states
+		#if (d1, d2) == (14,2):
+		#	pdb.set_trace()
 		tmp_paths = self.path_algorithm.get_Paths(tmptopo, my_src, d1)
+		#print tmp_paths
+
 		paths[(my_src, d1)]['path'] = tmp_paths[(my_src,d1)]['path']
 		
+		#print "paths:" + str(paths)
 
 
 	def min_Global(self, paths, my_src, my_dst):
 		P = []
-		ps1 = []
-		ps2 = deepcopy(my_dst)
+		ps2 = my_dst
 		paths_num = len(paths[(my_src, my_dst[0])]['path'])
-		while len(ps2) > 0:
-			for n in ps1:
-				self.min_Local(paths, my_src, n, ps2[0])
-			ps1.append(ps2.pop(0))
+		for i in range(len(ps2)):
+			for n in ps2[i+1:]:
+				#print n,ps2[i],i
+				self.min_Local(paths, my_src, n, ps2[i])
 
 	def delete_Worst_Path(self, path_s):
 		index = 99999
@@ -767,7 +815,9 @@ class Test_Path_Algorithm():
 			t1 = t1 + t
 		print 'ave time:' + str(t1/self.status['test_time'])
 
-my_test = Test_Path_Algorithm(Gen_Topo('/home/lsch/trace/topo20.topgen'))
+aaa_test_or_not = 1
+if aaa_test_or_not:
+	my_test = Test_Path_Algorithm(Gen_Topo('/home/lsch/trace/topo60.topgen'))
 """
 my_test.set_Status('test_time', 10)
 #my_test.set_Status('one_test_run_time', 1)
@@ -775,31 +825,75 @@ path_algorithm_nc_implement['SPFA'].set_Is_Improve(1)
 my_test.test(path_algorithm_nc_implement['SPFA'])
 
 """
-"""
-ran_nodes = my_test.rand_Gen_Nodes(my_test.status['topo'].nodenum, 5)
-if 1:
-	src = ran_nodes[0]
-	dst = ran_nodes[1:]
-else:
-	src = 3
-	dst = [17,6]
-print 'src:' + str(src)
-print 'dst:' + str(dst)
-def canculate_link(paths):
-	x = 0
+def find_Encode_Node(paths):
+	links = {}
 	for k in paths.keys():
-		for path in paths[k]['path']:
-			for l in path:
-				x = x + 1
-	return x
-				
-k = path_algorithm_nc_implement['Max_Flow']
-paths = k.get_Paths(my_test.status['topo'], src, dst)
-print 'have links:' + str(canculate_link(paths))
-print paths
-k.set_Is_Improve(1)
-paths = k.get_Paths(my_test.status['topo'], src, dst)
-print 'have links:' + str(canculate_link(paths))
-print paths
-"""
+		for p in paths[k]['path']:
+			tmpl = p[0]
+			for l in p[1:]:
+				try:
+					links[l]
+					try:
+						links[l].index(tmpl)
+					except:
+						links[l].append(tmpl)
+				except:
+					links[l] = [tmpl]
+				tmpl = l
+	encode_node = []
+	for k in links.keys():
+		if len(links[k]) >= 2:
+			encode_node.append(k)
+	return len(encode_node)
 
+def compare_test():
+	def calculate_link(paths):
+		links = []
+		for k in paths.keys():
+			for path in paths[k]['path']:
+				for l in path:
+					if l not in links:
+						links.append(l)
+		return len(links)
+
+	list1 = [3,6,11,16,21,26,31,36]
+	k = path_algorithm_nc_implement['Dijikstra']
+	for n in list1:
+		print "dst_num = " + str(n -1)
+		"""
+		"""
+		for i in range(100):
+			ran_nodes = my_test.rand_Gen_Nodes(my_test.status['topo'].nodenum, n)
+			if 1:
+				src = ran_nodes[0]
+				dst = ran_nodes[1:]
+			else:
+				src = 8
+				dst = [2,4,13,14]
+			#print 'src:' + str(src)
+			#print 'dst:' + str(dst)
+							
+			"""
+			k.set_Is_Improve(0)
+			paths = k.get_Paths(my_test.status['topo'], src, dst)
+			print 'have links:' + str(calculate_link(paths))
+			print 'have encode node: '+str(find_Encode_Node(paths))
+			#print my_test.status['topo'].adjacent
+			k.set_Is_Improve(1)
+			paths = k.get_Paths(my_test.status['topo'], src, dst)
+			print 'have links:' + str(calculate_link(paths))
+			print 'have encode node: '+str(find_Encode_Node(paths))
+			#print paths
+			"""
+			#print my_test.status['topo'].adjacent
+			k.set_Is_Improve(0)
+			paths = k.get_Paths(my_test.status['topo'], src, dst)
+			a = str(calculate_link(paths)) + ' ' + str(find_Encode_Node(paths))
+			k.set_Is_Improve(1)
+			paths = k.get_Paths(my_test.status['topo'], src, dst)
+			a += ' ' + str(calculate_link(paths)) + ' ' + str(find_Encode_Node(paths))
+			print a
+"""
+if aaa_test_or_not:
+	compare_test()
+"""

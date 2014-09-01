@@ -9,3 +9,5 @@ def launch ():
   launch()
   from openflow.spanning_tree import launch
   launch(no_flood=True, hold_down=True)
+  from host_tracker import launch
+  launch()
