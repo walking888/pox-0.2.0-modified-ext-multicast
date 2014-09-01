@@ -1,7 +1,6 @@
 POX:
 
-  Put igmp.py in pox/pox/lib/packet
-  Put this dir in pox/ext/
+  Replace the file in pox 0.2.0 by that in replace-pox-0.2.0-modified. (pox 0.2.0: https://github.com/noxrepo/pox.git)  
   Start this module by ./pox.py multicast.startmulti
   If you want see collected statistics, use ./pox.py multicast.startmulti log.level --mutlicast.multicollect=DEBUG
 
